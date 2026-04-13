@@ -363,6 +363,21 @@ body { font-family: 'Inter', system-ui, sans-serif; }
 <script>
 var currentTab = 'cancelled';
 var allOrdersCache = [];
+var invoiceCache = {};
+try {
+  var _saved = localStorage.getItem('bunjang_orders_cache');
+  if (_saved) {
+    var _parsed = JSON.parse(_saved);
+    if (_parsed.ts && (Date.now() - _parsed.ts < 3600000)) { allOrdersCache = _parsed.data || []; }
+    else { localStorage.removeItem('bunjang_orders_cache'); }
+  }
+  var _invSaved = localStorage.getItem('bunjang_invoice_cache');
+  if (_invSaved) {
+    var _invParsed = JSON.parse(_invSaved);
+    if (_invParsed.ts && (Date.now() - _invParsed.ts < 3600000)) { invoiceCache = _invParsed.data || {}; }
+    else { localStorage.removeItem('bunjang_invoice_cache'); }
+  }
+} catch(e) {}
 var cachedProductInfo = null;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -539,6 +554,7 @@ function loadOrders(type) {
   container.innerHTML = '<div class="text-center py-12"><div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-brand-50 mb-3"><i class="fas fa-spinner fa-spin text-xl text-brand-500"></i></div><div class="text-slate-500 text-sm">주문 로딩 중... (최근 ' + days + '일)</div></div>';
   apiFetch('/api/orders/extended?days=' + days).then(function(d) {
     var orders = d.data || []; allOrdersCache = orders;
+    try { localStorage.setItem('bunjang_orders_cache', JSON.stringify({ ts: Date.now(), data: allOrdersCache })); } catch(e) {}
     if (type === 'cancelled') {
       orders = orders.filter(function(o) { return o.orderItems && o.orderItems.some(function(it) {
         return it.status === 'CANCELLED' || it.status === 'REFUNDED' || it.status === 'RETURN_REQUESTED' || it.status === 'RETURN_IN_TRANSIT' || it.status === 'RETURN_COMPLETED';
@@ -719,6 +735,7 @@ function searchInvoice() {
   if (allOrdersCache.length === 0) {
     apiFetch('/api/orders/extended?days=90').then(function(d) {
       allOrdersCache = d.data || [];
+      try { localStorage.setItem('bunjang_orders_cache', JSON.stringify({ ts: Date.now(), data: allOrdersCache })); } catch(e) {}
       doInvoiceSearch(inv, container, progress);
     }).catch(function(e) {
       container.innerHTML = '<div class="text-center py-8 text-red-500"><i class="fas fa-exclamation-circle text-2xl block mb-2"></i>주문 로드 실패: ' + escapeHtml(e.message) + '</div>';
@@ -728,16 +745,65 @@ function searchInvoice() {
 
 function doInvoiceSearch(inv, container, progress) {
   var ids = allOrdersCache.map(function(o) { return o.id; });
-  container.innerHTML = '<div class="text-center py-8"><div class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-brand-50 mb-3"><i class="fas fa-spinner fa-spin text-brand-500"></i></div><div class="text-sm text-slate-500">' + ids.length + '건 주문에서 송장 <b>' + escapeHtml(inv) + '</b> 검색 중...</div></div>';
-  progress.className = 'text-sm text-slate-500 mb-2'; progress.textContent = '검색 대상: ' + ids.length + '건';
-  apiFetch('/api/orders/search-by-invoice-fast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invoiceNo: inv, orderIds: ids }) }).then(function(d) {
-    progress.className = 'hidden'; var matched = d.data || [];
-    if (matched.length === 0) {
-      container.innerHTML = '<div class="text-center py-12"><i class="fas fa-search text-3xl text-slate-200 block mb-3"></i><p class="text-slate-400">송장번호 <b>' + escapeHtml(inv) + '</b>에 해당하는 주문이 없습니다.</p><p class="text-xs text-slate-300 mt-1">' + (d.scanned || 0) + '건 조회 완료' + (d.errors && d.errors.length > 0 ? ', ' + d.errors.length + '건 오류' : '') + '</p></div>';
+  var cachedKeys = Object.keys(invoiceCache);
+  if (cachedKeys.length > 0) {
+    var quickMatch = [];
+    for (var ck = 0; ck < cachedKeys.length; ck++) {
+      var cd = invoiceCache[cachedKeys[ck]];
+      var cDel = (cd.delivery && cd.delivery.invoice) ? cd.delivery.invoice.no || '' : '';
+      var cRets = (cd.returns || []).map(function(r) { return (r.invoice && r.invoice.no) || ''; });
+      if (cDel.indexOf(inv) >= 0 || cRets.some(function(n) { return n.indexOf(inv) >= 0; })) quickMatch.push(cd);
+    }
+    if (cachedKeys.length >= ids.length && quickMatch.length > 0) {
+      renderInvoiceResults(container, quickMatch, inv);
+      progress.className = 'hidden';
+      toast(quickMatch.length + '건 찾음 (캐시)');
       return;
     }
-    renderInvoiceResults(container, matched, inv); toast(matched.length + '건 찾음');
-  }).catch(function(e) { progress.className = 'hidden'; container.innerHTML = '<div class="text-center py-8 text-red-500"><i class="fas fa-exclamation-circle text-2xl block mb-2"></i>검색 오류: ' + escapeHtml(e.message) + '</div>'; });
+    if (quickMatch.length > 0) {
+      renderInvoiceResults(container, quickMatch, inv);
+    }
+  }
+  var batchSize = 30;
+  var batches = [];
+  for (var i = 0; i < ids.length; i += batchSize) { batches.push(ids.slice(i, i + batchSize)); }
+  var allMatched = [];
+  var totalScanned = 0;
+  var totalErrors = 0;
+  var done = 0;
+  progress.className = 'text-sm text-slate-500 mb-2';
+  container.innerHTML = '<div class="text-center py-8"><div class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-brand-50 mb-3"><i class="fas fa-spinner fa-spin text-brand-500"></i></div><div class="text-sm text-slate-500">' + ids.length + '건 주문에서 송장 <b>' + escapeHtml(inv) + '</b> 검색 중... (0/' + batches.length + ')</div></div>';
+  function processBatch(idx) {
+    if (idx >= batches.length) {
+      progress.className = 'hidden';
+      if (allMatched.length === 0) {
+        container.innerHTML = '<div class="text-center py-12"><i class="fas fa-search text-3xl text-slate-200 block mb-3"></i><p class="text-slate-400">송장번호 <b>' + escapeHtml(inv) + '</b>에 해당하는 주문이 없습니다.</p><p class="text-xs text-slate-300 mt-1">' + totalScanned + '건 조회 완료' + (totalErrors > 0 ? ', ' + totalErrors + '건 오류' : '') + '</p></div>';
+      } else {
+        renderInvoiceResults(container, allMatched, inv); toast(allMatched.length + '건 찾음');
+        try { localStorage.setItem('bunjang_invoice_cache', JSON.stringify({ ts: Date.now(), data: invoiceCache })); } catch(e) {}
+      }
+      return;
+    }
+    progress.textContent = '검색 중: ' + (idx + 1) + '/' + batches.length + ' 배치 (' + totalScanned + '/' + ids.length + '건)';
+    apiFetch('/api/orders/search-by-invoice-fast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invoiceNo: inv, orderIds: batches[idx] }) }).then(function(d) {
+      var matched = d.data || [];
+      for (var m = 0; m < matched.length; m++) {
+        allMatched.push(matched[m]);
+        var _oid = (matched[m].order || matched[m]).id;
+        if (_oid) invoiceCache[_oid] = matched[m];
+      }
+      totalScanned += (d.scanned || batches[idx].length);
+      totalErrors += (d.errors ? d.errors.length : 0);
+      if (allMatched.length > 0) { renderInvoiceResults(container, allMatched, inv); }
+      else { container.innerHTML = '<div class="text-center py-8"><div class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-brand-50 mb-3"><i class="fas fa-spinner fa-spin text-brand-500"></i></div><div class="text-sm text-slate-500">' + totalScanned + '/' + ids.length + '건 검색 완료... (' + (idx + 1) + '/' + batches.length + ')</div></div>'; }
+      processBatch(idx + 1);
+    }).catch(function(e) {
+      totalErrors += batches[idx].length;
+      totalScanned += batches[idx].length;
+      processBatch(idx + 1);
+    });
+  }
+  processBatch(0);
 }
 
 function renderInvoiceResults(container, orders, query) {
