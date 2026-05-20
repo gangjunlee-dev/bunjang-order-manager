@@ -378,6 +378,22 @@ try {
     else { localStorage.removeItem('bunjang_invoice_cache'); }
   }
 } catch(e) {}
+
+function getRefundedSet() { try { return JSON.parse(localStorage.getItem('bunjang_refunded') || '[]'); } catch(e) { return []; } }
+function markRefunded(orderId) {
+  var set = getRefundedSet();
+  if (set.indexOf(orderId) < 0) { set.push(orderId); localStorage.setItem('bunjang_refunded', JSON.stringify(set)); }
+}
+function unmarkRefunded(orderId) {
+  var set = getRefundedSet().filter(function(id) { return id !== orderId; });
+  localStorage.setItem('bunjang_refunded', JSON.stringify(set));
+}
+function isRefunded(orderId) { return getRefundedSet().indexOf(orderId) >= 0; }
+function toggleRefunded(orderId) {
+  if (isRefunded(orderId)) { unmarkRefunded(orderId); toast('환불 처리 표시 해제'); }
+  else { markRefunded(orderId); toast('환불 처리 완료로 표시됨'); }
+  loadOrders('cancelled');
+}
 var cachedProductInfo = null;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -569,11 +585,25 @@ function loadOrders(type) {
         productIds += (j > 0 ? ', ' : '') + items[j].product.id;
       }
       var dateStr = items.length > 0 ? formatDate(items[0].statusUpdatedAt) : '-';
-      h += '<div class="order-row flex justify-between items-center" onclick="viewOrder(' + o.id + ')">';
-      h += '<div><div class="font-semibold text-slate-800">주문 #' + o.id + '</div>';
-      h += '<div class="text-xs text-slate-400 mt-1"><i class="fas fa-box text-slate-300 mr-1"></i>' + escapeHtml(productIds) + '</div>';
-      h += '<div class="text-xs text-slate-300 mt-0.5"><i class="fas fa-clock text-slate-200 mr-1"></i>' + dateStr + '</div></div>';
-      h += '<div class="flex flex-wrap gap-1 justify-end">' + statusBadges + '</div></div>';
+      var firstItem = items.length > 0 ? items[0] : null;
+      var pName = (firstItem && firstItem.product && firstItem.product.name) ? firstItem.product.name : '';
+      var pPrice = (firstItem && firstItem.product && firstItem.product.price) ? Number(firstItem.product.price).toLocaleString() + '원' : '';
+      var pImg = (firstItem && firstItem.product && firstItem.product.imageUrl) ? firstItem.product.imageUrl : '';
+      var extraItems = items.length > 1 ? ' 외 ' + (items.length - 1) + '건' : '';
+      var refDone = isRefunded(o.id);
+      h += '<div class="order-row' + (refDone ? ' border-green-300 bg-green-50' : '') + '">';
+      h += '<div class="flex gap-3" onclick="viewOrder(' + o.id + ')" style="cursor:pointer">';
+      if (pImg) { h += '<img src="' + escapeHtml(pImg.replace('_w160', '_w256')) + '" class="w-16 h-16 rounded-lg object-cover shrink-0 shadow-sm" onerror="this.remove()">'; }
+      else { h += '<div id="orderListImg-' + o.id + '" class="w-16 h-16 rounded-lg bg-surface-100 shrink-0 flex items-center justify-center text-slate-300"><i class="fas fa-image"></i></div>'; }
+      h += '<div class="flex-1 min-w-0">';
+      h += '<div class="flex items-center gap-2 mb-1"><span class="font-semibold text-slate-800 text-sm">#' + o.id + '</span>' + (refDone ? '<span class=\"badge bg-green-100 text-green-700\">환불처리완료</span>' : '') + '</div>';
+      if (pName) { h += '<div class="text-sm text-slate-700 line-clamp-1 font-medium">' + escapeHtml(pName) + escapeHtml(extraItems) + '</div>'; }
+      else { h += '<div class="text-xs text-slate-400">상품 #' + escapeHtml(productIds) + '</div>'; }
+      if (pPrice) { h += '<div class="text-sm font-bold text-brand-600 mt-0.5">' + pPrice + '</div>'; }
+      h += '<div class="flex items-center gap-2 mt-1"><span class="text-xs text-slate-400"><i class="fas fa-clock text-slate-300 mr-1"></i>' + dateStr + '</span>' + statusBadges + '</div>';
+      h += '</div></div>';
+      h += '<div class="flex justify-end mt-2"><button onclick="event.stopPropagation(); toggleRefunded(' + o.id + ')" class="btn ' + (refDone ? 'btn-success' : 'btn-secondary') + ' text-xs py-1"><i class="fas fa-' + (refDone ? 'check-circle' : 'circle') + '"></i>' + (refDone ? '처리완료' : '환불처리') + '</button></div>';
+      h += '</div>';
     }
     container.innerHTML = h; toast(orders.length + '건 로드 완료');
   }).catch(function(e) { container.innerHTML = '<div class="text-center py-12 text-red-500"><i class="fas fa-exclamation-circle text-2xl block mb-2"></i>오류: ' + escapeHtml(e.message) + '</div>'; });
