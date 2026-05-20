@@ -598,7 +598,7 @@ function loadOrders(type) {
       h += '<div class="flex-1 min-w-0">';
       h += '<div class="flex items-center gap-2 mb-1"><span class="font-semibold text-slate-800 text-sm">#' + o.id + '</span>' + (refDone ? '<span class=\"badge bg-green-100 text-green-700\">환불처리완료</span>' : '') + '</div>';
       if (pName) { h += '<div class="text-sm text-slate-700 line-clamp-1 font-medium">' + escapeHtml(pName) + escapeHtml(extraItems) + '</div>'; }
-      else { h += '<div class="text-xs text-slate-400">상품 #' + escapeHtml(productIds) + '</div>'; }
+      else { h += '<div class="text-xs text-slate-400" data-order-name="' + o.id + '">상품 #' + escapeHtml(productIds) + '</div>'; }
       if (pPrice) { h += '<div class="text-sm font-bold text-brand-600 mt-0.5">' + pPrice + '</div>'; }
       h += '<div class="flex items-center gap-2 mt-1"><span class="text-xs text-slate-400"><i class="fas fa-clock text-slate-300 mr-1"></i>' + dateStr + '</span>' + statusBadges + '</div>';
       h += '</div></div>';
@@ -606,6 +606,41 @@ function loadOrders(type) {
       h += '</div>';
     }
     container.innerHTML = h; toast(orders.length + '건 로드 완료');
+    // 비동기 상품 상세 로딩 (이미지, 이름, 가격)
+    var loadQueue = [];
+    for (var li = 0; li < orders.length; li++) {
+      var lo = orders[li];
+      var loItems = lo.orderItems || [];
+      var lFirst = loItems.length > 0 ? loItems[0] : null;
+      if (lFirst && lFirst.product && lFirst.product.id && !lFirst.product.name) {
+        loadQueue.push({ orderId: lo.id, pid: lFirst.product.id });
+      }
+    }
+    function loadBatchDetails(queue, idx) {
+      if (idx >= queue.length) return;
+      var batchEnd = Math.min(idx + 5, queue.length);
+      var batch = queue.slice(idx, batchEnd);
+      Promise.all(batch.map(function(item) {
+        return apiFetch('/api/products/' + item.pid).then(function(pd) {
+          var pp = pd.data || pd;
+          var imgUrl = (pp.imageUrls && pp.imageUrls.length > 0) ? pp.imageUrls[0] : '';
+          var el = document.getElementById('orderListImg-' + item.orderId);
+          if (el && imgUrl) {
+            el.outerHTML = '<img src="' + escapeHtml(imgUrl) + '" class="w-16 h-16 rounded-lg object-cover shrink-0 shadow-sm" onerror="this.remove()">';
+          }
+          return { orderId: item.orderId, name: pp.name || '', price: pp.price || 0, imgUrl: imgUrl };
+        }).catch(function() { return null; });
+      })).then(function(results) {
+        for (var ri = 0; ri < results.length; ri++) {
+          if (!results[ri]) continue;
+          var r = results[ri];
+          var nameEl = document.querySelector('[data-order-name="' + r.orderId + '"]');
+          if (nameEl && r.name) { nameEl.innerHTML = '<div class="text-sm text-slate-700 line-clamp-1 font-medium">' + escapeHtml(r.name) + '</div>' + (r.price ? '<div class="text-sm font-bold text-brand-600">' + Number(r.price).toLocaleString() + '원</div>' : ''); }
+        }
+        loadBatchDetails(queue, batchEnd);
+      });
+    }
+    if (loadQueue.length > 0) loadBatchDetails(loadQueue, 0);
   }).catch(function(e) { container.innerHTML = '<div class="text-center py-12 text-red-500"><i class="fas fa-exclamation-circle text-2xl block mb-2"></i>오류: ' + escapeHtml(e.message) + '</div>'; });
 }
 
